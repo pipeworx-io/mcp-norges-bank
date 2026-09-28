@@ -670,6 +670,182 @@ function pickMessage(node: unknown, depth: number): string | null {
 function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
+
+
+/**
+ * What an SDMX REST server means by a 404 (fleet #2494).
+ *
+ * SDMX servers answer "nothing here" with a 404 and a one-line body, and the
+ * same status covers two opposite situations:
+ *   - the dataflow EXISTS and the key/period matched no observations — an
+ *     honest empty, which must come back as an empty result with a reason
+ *     (docs/silent-zero-policy.md), not as a failure; and
+ *   - the dataflow id does NOT exist — the caller's argument is wrong, and the
+ *     answer is a `not_found` pointing at the pack's list tool.
+ * A 422 is a third caller mistake: the key has the wrong number of positions.
+ *
+ * Every SDMX pack used to throw all of these as a bare `<SOURCE>: 404 <body>`,
+ * which the gateway books as class `error` (a Pipeworx defect, 500) and answers
+ * with "Retry the same tool…". abs-au's one external caller retried 55 times in
+ * an hour; istat-it, statec-lu and ilostat had the identical mapping.
+ *
+ * The body patterns are VERBATIM from the live servers, 2026-09-28. The wording
+ * is per server implementation, not per agency, which is why it lives here once:
+ *   .Stat Suite / NSI (ABS, ISTAT, STATEC, ILO):
+ *     404 "NoRecordsFound"
+ *     404 "Could not find Dataflow and/or DSD related with this data request"
+ *     404 "Could not find requested structures"
+ *     422 "Not enough key values in query, expecting 5 got 2"
+ *     403 (OECD) "Not enough key values in query, expecting 13 got 10"
+ *   ILO (its own no-data wording on the same NSI stack):
+ *     404 "No data is found. Please adjust your query parameters and try again."
+ *   Fusion Metadata Registry (UNICEF):
+ *     404 {"errors":[{"code":404,"message":"No data for data query against the dataflow: urn:…"}]}
+ *     404 {"errors":[{"code":404,"message":"No Dataflow exists for query : Target: Dataflow - … Maintainable Id: X …"}]}
+ *
+ * An unrecognised 404 body returns undefined on purpose: the pack keeps its old
+ * error path, so a dead endpoint that also answers 404 stays visible as a
+ * failure instead of being relabelled as a quiet empty.
+ *
+ * Self-contained (no imports) so publish-pack's helper inliner can copy it into
+ * a standalone pack bundle.
+ */
+
+type SdmxMiss = 'no_records' | 'no_dataflow' | 'bad_key';
+
+const NO_RECORDS = /NoRecordsFound|NoResultsFound|No data is found|No data for data query|No Results Found/i;
+const NO_DATAFLOW = /Could not find Dataflow|Could not find requested structures?|No Dataflow exists|No Structures? (?:found|exists)/i;
+const BAD_KEY = /key values in query|expecting \d+ got \d+|Invalid (?:data )?key|not a valid key/i;
+
+/** Which caller-side miss an SDMX error response is, or undefined when it is none of them. */
+function classifySdmxMiss(status: number, body: string): SdmxMiss | undefined {
+  if (status === 404) {
+    // Order matters only for a body that somehow names both; "no records"
+    // presupposes the dataflow resolved, so it is the more specific claim.
+    if (NO_RECORDS.test(body)) return 'no_records';
+    if (NO_DATAFLOW.test(body)) return 'no_dataflow';
+    return undefined;
+  }
+  if (status === 422) return 'bad_key';
+  // OECD's .Stat Suite answers the same wrong-length key with a 403, not a 422
+  // (live 2026-09-28, fleet #2496). Body-gated, so an auth 403 stays unclassified.
+  if ((status === 400 || status === 403) && BAD_KEY.test(body)) return 'bad_key';
+  return undefined;
+}
+
+/** A non-OK SDMX response, keeping status and body so a caller can classify it. */
+class SdmxHttpError extends Error {
+  readonly status: number;
+  readonly body: string;
+  constructor(status: number, body: string, message: string) {
+    super(message);
+    this.name = 'SdmxHttpError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * The error a pack's SDMX fetch should throw for a non-OK response: carries
+ * status and body, and leads with `upstream_down:` for a 5xx or 429 so a real
+ * outage keeps its class.
+ */
+function sdmxHttpError(source: string, status: number, body: string): SdmxHttpError {
+  const prefix = status >= 500 || status === 429 ? 'upstream_down: ' : '';
+  return new SdmxHttpError(status, body, `${prefix}${source}: ${status} ${body}`);
+}
+
+interface SdmxMissContext {
+  /** Human name of the source, e.g. "ISTAT". */
+  source: string;
+  dataflowId: string;
+  key?: string;
+  startPeriod?: string;
+  endPeriod?: string;
+  /** The pack's argument NAME for the dataflow id (default "dataflow_id"). */
+  idArg?: string;
+  /** The pack's list and structure tool names (defaults: list_dataflows, dataflow_structure). */
+  listTool?: string;
+  structureTool?: string;
+  /**
+   * Which endpoint answered. On a STRUCTURE query (/dataflow/…, /datastructure/…)
+   * there are no observations to be missing, so a "no results" body can only
+   * mean the structure does not exist — UNICEF answers an unknown dataflow's
+   * structure with `{"errors":[{"code":404,"message":"No Results Found"}]}`.
+   * Default 'data'.
+   */
+  endpoint?: 'data' | 'structure';
+}
+
+/**
+ * The DSD id a dataflow points at, read from a `/dataflow/{agency}/{id}` stub
+ * response (SDMX-JSON 1.0 `data.dataflows[0].structure`, a URN like
+ * "urn:sdmx:…DataStructure=IT1:DCSP_COLTIVAZIONI(1.1)").
+ *
+ * Exists because a dataflow id is NOT its DSD id for every flow: ISTAT's
+ * 101_1015 is DSD DCSP_COLTIVAZIONI, and 9 of ABS's 1,227 flows differ
+ * (LF_UNDER → DS_LF_UNDER). A pack that asks /datastructure/{dataflowId} gets
+ * "Could not find requested structures" for those, which must not be reported
+ * as "no such dataflow".
+ */
+function dsdIdFromDataflow(json: unknown): string | undefined {
+  const data = (json as { data?: { dataflows?: { structure?: unknown }[] } } | null)?.data;
+  const urn = data?.dataflows?.[0]?.structure;
+  if (typeof urn !== 'string') return undefined;
+  const m = urn.match(/[=:]([A-Za-z0-9_@$\-]+)\([^)]*\)\s*$/);
+  return m?.[1];
+}
+
+/**
+ * What a pack should RETURN for a caught SDMX error, or undefined when the
+ * error is not a recognised caller-side miss (the pack rethrows it).
+ *
+ *   no_records  → `{dataflow_id, key, series_count: 0, series: [], empty_reason: 'no_match', note}`
+ *   no_dataflow → `{error: 'not_found', message}` naming the list tool
+ *   bad_key     → `{error: 'user_error', message}` naming the structure tool
+ *
+ * Returned rather than thrown so the gateway books the envelope's own class
+ * (user_error / not_found) with a 200, not a blanket thrown-exception 500.
+ */
+function sdmxMissResult(err: unknown, ctx: SdmxMissContext): Record<string, unknown> | undefined {
+  if (!(err instanceof SdmxHttpError)) return undefined;
+  let miss = classifySdmxMiss(err.status, err.body);
+  if (!miss) return undefined;
+  if (ctx.endpoint === 'structure' && miss === 'no_records') miss = 'no_dataflow';
+  const idArg = ctx.idArg ?? 'dataflow_id';
+  const listTool = ctx.listTool ?? 'list_dataflows';
+  const structureTool = ctx.structureTool ?? 'dataflow_structure';
+  const structureCall = `${structureTool}({${idArg}: "${ctx.dataflowId}"})`;
+  if (miss === 'no_records') {
+    const period = ctx.startPeriod || ctx.endPeriod ? ` in period ${ctx.startPeriod ?? '…'} to ${ctx.endPeriod ?? '…'}` : '';
+    return {
+      dataflow_id: ctx.dataflowId,
+      key: ctx.key ?? 'all',
+      ...(ctx.startPeriod ? { start_period: ctx.startPeriod } : {}),
+      ...(ctx.endPeriod ? { end_period: ctx.endPeriod } : {}),
+      series_count: 0,
+      series: [],
+      empty_reason: 'no_match',
+      note:
+        `${ctx.source} has dataflow "${ctx.dataflowId}" but no observations match key "${ctx.key ?? 'all'}"${period}. ` +
+        `Check each dot-separated position against the valid codes from ${structureCall}, or widen the period.`,
+    };
+  }
+  if (miss === 'no_dataflow') {
+    return {
+      error: 'not_found',
+      message: `${ctx.source} has no dataflow "${ctx.dataflowId}". Call ${listTool} to find the id, then ${structureTool} to build the key.`,
+      [idArg]: ctx.dataflowId,
+    };
+  }
+  const detail = err.body.replace(/\s+/g, ' ').trim().slice(0, 200);
+  return {
+    error: 'user_error',
+    message:
+      `${ctx.source} rejected key "${ctx.key ?? ''}" for dataflow "${ctx.dataflowId}"${detail ? `: ${detail}` : ''}. ` +
+      `The key needs one dot-separated position per dimension, in the order ${structureCall} lists them.`,
+  };
+}
 /**
  * Norges Bank (Norway's central bank) MCP — exchange rates, interest rates,
  * and government debt key figures via the SDMX 2.1 REST API.
@@ -834,6 +1010,37 @@ async function fetchData(
   const res = await pwFetch(url, { headers: { Accept: 'application/json', 'User-Agent': UA } });
   if (!res.ok) {
     const body = await res.text();
+    // Norges Bank runs Fusion Metadata Registry (same bodies as UNICEF). An
+    // unknown flow already classed as not_found by wording, but a key/period
+    // that matched nothing did too — told to "look up a valid value" when the
+    // honest answer is an empty result (fleet #2496).
+    const miss = classifySdmxMiss(res.status, body);
+    if (miss === 'no_records') {
+      return {
+        flow,
+        key: key ?? null,
+        series_count: 0,
+        series: [],
+        empty_reason: 'no_match',
+        note:
+          flow === 'EXR' && key && /^B\.[A-Z]{3}\.NOK\.SP$/.test(key)
+            ? `Norges Bank publishes no NOK exchange rate for currency "${key.split('.')[1]}"${opts.start_period || opts.end_period ? ' in that period' : ''}.`
+            : `Norges Bank has flow "${flow}" but no observations match key "${key ?? 'all'}"${opts.start_period || opts.end_period ? ' in that period' : ''}. Leave key positions empty to wildcard them, or widen the period.`,
+      };
+    }
+    if (miss === 'no_dataflow') {
+      return {
+        error: 'not_found',
+        message: `Norges Bank has no flow "${flow}". Call list_flows for the valid flow references (EXR, IR, GOVT_KEYFIGURES, GOVT_GENERIC_RATES).`,
+        flow_ref: flow,
+      };
+    }
+    if (miss === 'bad_key') {
+      return {
+        error: 'user_error',
+        message: `Norges Bank rejected key "${key ?? ''}" for flow "${flow}": ${body.replace(/\s+/g, ' ').trim().slice(0, 200)}.`,
+      };
+    }
     throw new Error(`Norges Bank: ${res.status} ${body.slice(0, 200)}`);
   }
   // The API may serve CSV/text for some flows; fall back to raw text if not JSON.

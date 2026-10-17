@@ -1,15 +1,16 @@
 # mcp-norges-bank
 
-Norges Bank (Norway's central bank) MCP — exchange rates, interest rates,
+Norges Bank (Norway's central bank) MCP — exchange rates, interest rates, and government debt key figures via the SDMX 2.1 REST API.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
 | `get_exchange_rate` | Latest (or last N) Norges Bank exchange rate for a currency against the Norwegian krone (NOK). The value is how many NOK one unit of the base currency buys (e.g. USD → ~9.25 NOK). Builds the EXR series key B.{CURRENCY}.NOK.SP (business-day spot). currency is the ISO 4217 code, e.g. "USD", "EUR", "GBP", "SEK", "JPY". |
-| `get_series` | Generic SDMX data fetch from any Norges Bank flow. key is dot-separated SDMX dimension filters; leave a position empty to wildcard it. Examples: flow_ref="EXR", key="B.USD.NOK.SP" (daily USD→NOK spot); flow_ref="IR" (all interest-rate series). Use list_flows to see available flow references. |
+| `get_policy_rate` | Norges Bank's current key policy rate (the sight deposit rate paid on banks' reserves): the rate, the date it took effect, the previous rate, and when that one took effect, plus recent decision history. Computed from the daily policy-rate series, so it reflects the most recent rate-setting meeting. history is how many past rate changes to include (default 5, max 20). |
+| `get_series` | Generic SDMX data fetch from any Norges Bank flow. key is dot-separated SDMX dimension filters; leave a position empty to wildcard it. Examples: flow_ref="EXR", key="B.USD.NOK.SP" (daily USD→NOK spot); flow_ref="IR" (all interest-rate series). For the current policy rate specifically, use get_policy_rate instead of guessing an IR key. Use list_flows to see available flow references. |
 | `list_flows` | List the four Norges Bank SDMX data flows available in this pack (EXR exchange rates, IR interest rates, GOVT_KEYFIGURES, GOVT_GENERIC_RATES) with each flow's dimension order, an example series key, and usage notes. |
 
 ## Quick Start
@@ -56,19 +57,19 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1684+ data sources. The
+Both URLs reach the same gateway and the same 1819+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
 ## No MCP client? Call it over HTTP
 
 ```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/norges_bank_get_exchange_rate \
+curl -X POST https://gateway.pipeworx.io/v1/tools/get_exchange_rate \
   -H 'Content-Type: application/json' \
   -d '{"currency":"USD"}'
 ```
 
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/norges_bank_get_exchange_rate`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/get_exchange_rate`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
 
 ## Standalone (no gateway account)
 

@@ -866,8 +866,17 @@ function sdmxMissResult(err: unknown, ctx: SdmxMissContext): Record<string, unkn
  *
  * Tools:
  * - get_exchange_rate: convenience — a currency code (USD/EUR/SEK/...) → NOK.
+ * - get_policy_rate:   convenience — current key policy rate, when it took effect,
+ *                      the previous rate, and recent decision history, computed
+ *                      from the daily IR series (no series key to guess).
  * - get_series:        generic SDMX query against any flow + dot-separated key.
  * - list_flows:        documents the available flow references.
+ *
+ * The IR flow's key shape (FREQ.INSTRUMENT_TYPE.TENOR.UNIT_MEASURE, e.g.
+ * B.KPRA.SD.R) is not guessable from the EXR shape — get_series validates an
+ * IR key against the real codelist locally and returns a named error listing
+ * the valid values rather than forwarding a guessed key upstream and getting
+ * back a silent, empty-but-200 "no observations match" (fleet #3204).
  */
 
 
@@ -881,6 +890,23 @@ async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response>
 
 const BASE = 'https://data.norges-bank.no/api';
 const UA = 'pipeworx-mcp-norges-bank/1.0 (+https://pipeworx.io)';
+
+// The IR flow's real SDMX key dimensions (FREQ.INSTRUMENT_TYPE.TENOR.UNIT_MEASURE),
+// confirmed against the flow's own structure metadata. A guessed IR key (e.g. a
+// shape copied from EXR's FREQ.BASE_CUR.QUOTE_CUR.TENOR) does not 400 upstream —
+// it comes back a plain 200 with series_count 0, a silent empty success. Since
+// this codelist is small and stable, get_series validates an IR key against it
+// locally and returns a named error BEFORE calling upstream (fleet #3204).
+const IR_KEY_DIMENSIONS: { id: string; values: Record<string, string> }[] = [
+  { id: 'FREQ', values: { A: 'Annual', B: 'Business', M: 'Monthly' } },
+  { id: 'INSTRUMENT_TYPE', values: { KPRA: 'Key policy rate' } },
+  { id: 'TENOR', values: { SD: 'Policy rate (sight deposit rate)', OL: 'Overnight lending rate', RR: 'Reserve rate' } },
+  { id: 'UNIT_MEASURE', values: { R: 'Rate' } },
+];
+// Daily key-policy-rate series key: FREQ=B (business-day), INSTRUMENT_TYPE=KPRA,
+// TENOR=SD (policy rate, as opposed to the overnight lending/reserve corridor
+// rates), UNIT_MEASURE=R.
+const POLICY_RATE_KEY = 'B.KPRA.SD.R';
 
 const tools: McpToolExport['tools'] = [
   {
@@ -902,11 +928,26 @@ const tools: McpToolExport['tools'] = [
     },
   },
   {
+    name: 'get_policy_rate',
+    description:
+      "Norges Bank's current key policy rate (the sight deposit rate paid on banks' reserves): the rate, the " +
+      'date it took effect, the previous rate, and when that one took effect, plus recent decision history. ' +
+      'Computed from the daily policy-rate series, so it reflects the most recent rate-setting meeting. ' +
+      'history is how many past rate changes to include (default 5, max 20).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        history: { type: 'number', description: 'How many past rate changes to include in decision_history (default 5, max 20).' },
+      },
+    },
+  },
+  {
     name: 'get_series',
     description:
       'Generic SDMX data fetch from any Norges Bank flow. key is dot-separated SDMX dimension filters; ' +
       'leave a position empty to wildcard it. ' +
       'Examples: flow_ref="EXR", key="B.USD.NOK.SP" (daily USD→NOK spot); flow_ref="IR" (all interest-rate series). ' +
+      'For the current policy rate specifically, use get_policy_rate instead of guessing an IR key. ' +
       'Use list_flows to see available flow references.',
     inputSchema: {
       type: 'object',
@@ -943,10 +984,14 @@ const FLOWS = [
   },
   {
     flow_ref: 'IR',
-    name: 'Interest rates',
-    key_dimensions: ['FREQ', 'TENOR', 'IR_TYPE', '...'],
-    example_key: '',
-    note: 'Includes the Norges Bank policy (key) rate and money-market rates.',
+    name: 'Interest rates (policy rate)',
+    key_dimensions: ['FREQ', 'INSTRUMENT_TYPE', 'TENOR', 'UNIT_MEASURE'],
+    example_key: POLICY_RATE_KEY,
+    note:
+      'The key policy rate (sight deposit rate). FREQ: A/B/M (annual/business-day/monthly). ' +
+      'INSTRUMENT_TYPE: KPRA (key policy rate — the only value). ' +
+      'TENOR: SD (policy rate), OL (overnight lending rate), RR (reserve rate). UNIT_MEASURE: R (rate). ' +
+      'For the current rate + when it last changed, use get_policy_rate instead of building this key by hand.',
   },
   {
     flow_ref: 'GOVT_KEYFIGURES',
@@ -968,6 +1013,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   switch (name) {
     case 'get_exchange_rate':
       return getExchangeRate(args);
+    case 'get_policy_rate':
+      return getPolicyRate(args);
     case 'get_series':
       return getSeries(args);
     case 'list_flows':
@@ -975,6 +1022,82 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+/** Dot-separated key validity against IR_KEY_DIMENSIONS. Empty positions wildcard. */
+function validateIrKey(key: string): { ok: true } | { ok: false; message: string } {
+  const segs = key.split('.');
+  const hint =
+    `IR keys are ${IR_KEY_DIMENSIONS.map((d) => d.id).join('.')}, e.g. "${POLICY_RATE_KEY}" (daily key policy rate). ` +
+    'Call get_policy_rate for the current rate directly, or list_flows for the full codelist.';
+  if (segs.length !== IR_KEY_DIMENSIONS.length) {
+    return {
+      ok: false,
+      message: `Norges Bank IR keys have ${IR_KEY_DIMENSIONS.length} dot-separated positions, got ${segs.length} in "${key}". ${hint}`,
+    };
+  }
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    if (!seg) continue; // wildcarded position
+    const dim = IR_KEY_DIMENSIONS[i];
+    if (!(seg.toUpperCase() in dim.values)) {
+      const valid = Object.entries(dim.values)
+        .map(([id, label]) => `${id} (${label})`)
+        .join(', ');
+      return {
+        ok: false,
+        message: `Norges Bank IR key position ${i + 1} (${dim.id}) has no value "${seg}". Valid ${dim.id} values: ${valid}. ${hint}`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+async function getPolicyRate(args: Record<string, unknown>) {
+  const historyRaw = Number(args.history);
+  const historyN = Math.max(1, Math.min(20, Number.isFinite(historyRaw) && historyRaw > 0 ? historyRaw : 5));
+  // ~6 years of business days — comfortably more than enough to see the last
+  // several rate decisions (meetings run ~8/year and the rate often holds for
+  // multiple meetings), without pulling the full ~35-year history.
+  const result = (await fetchData('IR', POLICY_RATE_KEY, { last_n: 1500 })) as {
+    error?: string;
+    series?: { observations: { period: string; value: number | null }[] }[];
+  };
+  if (result.error) return result; // propagate a loud upstream error untouched
+  const obs = (result.series?.[0]?.observations ?? []).filter((o) => o.value !== null) as {
+    period: string;
+    value: number;
+  }[];
+  if (obs.length === 0) {
+    return {
+      error: 'no_data',
+      message:
+        `Norges Bank returned no observations for the key policy rate series (${POLICY_RATE_KEY}). ` +
+        'The series shape may have changed upstream; call get_series with flow_ref "IR" and no key to see what is currently published.',
+    };
+  }
+  // obs is sorted ascending by period (normalizeSdmx sorts it). Walk forward
+  // and record each point where the rate changes.
+  const changes: { rate: number; effective_since: string }[] = [{ rate: obs[0].value, effective_since: obs[0].period }];
+  for (let i = 1; i < obs.length; i++) {
+    if (obs[i].value !== changes[changes.length - 1].rate) {
+      changes.push({ rate: obs[i].value, effective_since: obs[i].period });
+    }
+  }
+  const current = changes[changes.length - 1];
+  const previous = changes.length > 1 ? changes[changes.length - 2] : null;
+  return {
+    rate: current.rate,
+    unit: 'percent',
+    effective_since: current.effective_since,
+    previous_rate: previous?.rate ?? null,
+    previous_rate_effective_since: previous?.effective_since ?? null,
+    decision_history: changes.slice(-historyN).reverse(),
+    data_as_of: obs[obs.length - 1].period,
+    note:
+      "Norges Bank's key policy rate (the sight deposit rate on banks' reserves), from the daily series. " +
+      'A rate change normally takes effect the business day after the Monetary Policy and Financial Stability Committee announcement.',
+  };
 }
 
 async function getExchangeRate(args: Record<string, unknown>) {
@@ -989,7 +1112,16 @@ async function getExchangeRate(args: Record<string, unknown>) {
 }
 
 async function getSeries(args: Record<string, unknown>) {
-  return fetchData(reqStr(args, 'flow_ref', '"EXR"'), (args.key as string | undefined)?.trim() || undefined, {
+  const flow = reqStr(args, 'flow_ref', '"EXR"');
+  let key = (args.key as string | undefined)?.trim() || undefined;
+  if (flow.toUpperCase() === 'IR' && key) {
+    const v = validateIrKey(key);
+    if (!v.ok) {
+      return { error: 'invalid_key', flow_ref: flow, key, message: v.message };
+    }
+    key = key.toUpperCase(); // IR codes are always uppercase; be forgiving of case on input.
+  }
+  return fetchData(flow, key, {
     start_period: args.start_period as string | undefined,
     end_period: args.end_period as string | undefined,
     last_n: args.last_n as number | undefined,
@@ -1025,7 +1157,7 @@ async function fetchData(
         note:
           flow === 'EXR' && key && /^B\.[A-Z]{3}\.NOK\.SP$/.test(key)
             ? `Norges Bank publishes no NOK exchange rate for currency "${key.split('.')[1]}"${opts.start_period || opts.end_period ? ' in that period' : ''}.`
-            : `Norges Bank has flow "${flow}" but no observations match key "${key ?? 'all'}"${opts.start_period || opts.end_period ? ' in that period' : ''}. Leave key positions empty to wildcard them, or widen the period.`,
+            : `Norges Bank has flow "${flow}" but no observations match key "${key ?? 'all'}"${opts.start_period || opts.end_period ? ' in that period' : ''}. Leave key positions empty to wildcard them, widen the period, or call list_flows for each flow's key shape and dimension codes.`,
       };
     }
     if (miss === 'no_dataflow') {

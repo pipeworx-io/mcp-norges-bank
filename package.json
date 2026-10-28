@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-norges-bank",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Norges Bank (Norway's central bank) MCP — exchange rates, interest rates, and government debt key figures via the SDMX 2.1 REST API.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-c13d286b483acd7ad14ebea7a10da18364ae25ba37f2ac9841693a583aa031d4",
-    "sourceCommit": "f5821587e59206a76fc200d1b9cbeaad15a549ab"
+    "sourceHash": "v1-07abdeace9f22db6d06db91e54e9842d0e829b3d479d8c2c724ef9f610ab54d4",
+    "sourceCommit": "774de7f685a75e02d0b828d24a7b94794102152c"
   }
 }

@@ -2,7 +2,7 @@
 
 Norges Bank (Norway's central bank) MCP — exchange rates, interest rates, and government debt key figures via the SDMX 2.1 REST API.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1877+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
@@ -57,19 +57,19 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1819+ data sources. The
+Both URLs reach the same gateway and the same 1877+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
 ## No MCP client? Call it over HTTP
 
 ```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/get_exchange_rate \
+curl -X POST https://gateway.pipeworx.io/v1/tools/norges_bank_get_exchange_rate \
   -H 'Content-Type: application/json' \
   -d '{"currency":"USD"}'
 ```
 
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/get_exchange_rate`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/norges_bank_get_exchange_rate`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
 
 ## Standalone (no gateway account)
 

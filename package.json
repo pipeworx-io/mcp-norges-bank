@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-norges-bank",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Norges Bank (Norway's central bank) MCP — exchange rates, interest rates, and government debt key figures via the SDMX 2.1 REST API.",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-norges-bank": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "norges-bank"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-norges-bank.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/norges-bank",
   "pipeworx": {
-    "sourceHash": "v1-07abdeace9f22db6d06db91e54e9842d0e829b3d479d8c2c724ef9f610ab54d4",
-    "sourceCommit": "774de7f685a75e02d0b828d24a7b94794102152c"
+    "mode": "gateway",
+    "slug": "norges-bank",
+    "gatewaySlug": "norges-bank",
+    "sourceHash": "v1-47e5bae5110b8e78a7f5f547a3883ba5b92d7ba86b10ab1b6d5f409223abc5f8",
+    "sourceCommit": "b2c4383545bb35171d0ada2beb1c9c7168ea175e"
   }
 }
